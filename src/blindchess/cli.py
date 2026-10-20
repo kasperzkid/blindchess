@@ -153,6 +153,7 @@ def interactive_main_menu(
 ) -> None:
     """Display interactive main menu for BlindChess."""
     ui = TerminalUI(ascii_only=config.ascii_only)
+    c = ui.palette
 
     while True:
         ui.print_banner()
@@ -166,25 +167,43 @@ def interactive_main_menu(
             training_level=config.training_level,
         )
 
-        menu_text = """
-Choose a mode:
+        # Categorized, clean menu panels
+        col1_title = c.highlight("SPARRING & DRILLS")
+        col2_title = c.highlight("CALCULATION & REASONING")
+        col3_title = c.highlight("ANALYSIS & PROGRESS")
 
- 1. Blindfold Game (Board Hidden)
- 2. Strength-Based Opponent (Play Stockfish)
- 3. Spatial Visualization Drills (Level 1-6)
- 4. Calculation Training (Candidate Moves)
- 5. Variation Explorer (MultiPV Tree)
- 6. Strategic Position Training
- 7. Tactical Training (Puzzles & Hints)
- 8. Opening Repertoire Practice
- 9. Endgame Practice
-10. Game Review
-11. Training Statistics & Progress
-12. Settings
-13. Quit
-"""
-        print(menu_text)
-        choice = ui.prompt("Enter option (1-13): ")
+        print(f"  {col1_title:<32} {col2_title:<36} {col3_title}")
+        print(f"  {c.muted('─'*24):<32} {c.muted('─'*28):<36} {c.muted('─'*24)}")
+
+        row1 = (
+            f"  {c.muted('[')}{c.accent_bold('1')}{c.muted(']')} Blindfold Game          "
+            f"{c.muted('[')}{c.accent_bold('4')}{c.muted(']')} Candidate Calculation      "
+            f"{c.muted('[')}{c.accent_bold('5')}{c.muted(']')} Variation Explorer"
+        )
+        row2 = (
+            f"  {c.muted('[')}{c.accent_bold('2')}{c.muted(']')} Play vs Stockfish       "
+            f"{c.muted('[')}{c.accent_bold('6')}{c.muted(']')} Strategic Position Coach   "
+            f"{c.muted('[')}{c.accent_bold('10')}{c.muted(']')} Game Diagnostic Review"
+        )
+        row3 = (
+            f"  {c.muted('[')}{c.accent_bold('8')}{c.muted(']')} Opening Repertoires     "
+            f"{c.muted('[')}{c.accent_bold('7')}{c.muted(']')} Tactical Training (Puzzles)"
+            f" {c.muted('[')}{c.accent_bold('11')}{c.muted(']')} Training Statistics"
+        )
+        row4 = (
+            f"  {c.muted('[')}{c.accent_bold('9')}{c.muted(']')} Endgame Fundamentals    "
+            f"{c.muted('[')}{c.accent_bold('3')}{c.muted(']')} Spatial Memory Drills      "
+            f"{c.muted('[')}{c.accent_bold('12')}{c.muted(']')} System Configuration"
+        )
+
+        print(f"{row1}\n{row2}\n{row3}\n{row4}\n")
+        ui.print_shortcut_bar([
+            ("1-12", "Select Mode"),
+            ("q", "Quit"),
+        ])
+        print()
+
+        choice = ui.prompt("Select option: ").lower().strip()
 
         if choice in ("1", "blindfold"):
             run_game_loop(config, engine_mgr, db_mgr, user_side=config.user_side, show_board=False)
@@ -216,16 +235,17 @@ Choose a mode:
         elif choice in ("11", "stats"):
             display_statistics(db_mgr, config)
         elif choice in ("12", "settings"):
-            print("\nCurrent Configuration:")
-            for k, v in config.to_dict().items():
-                print(f"  {k:<24}: {v}")
-            print()
+            ui.print_divider("Active Configuration")
+            rows = []
+            for k, v in sorted(config.to_dict().items()):
+                rows.append([k, str(v) if v is not None else "(auto)"])
+            ui.print_table(["Setting Key", "Current Value"], rows)
             ui.prompt("Press Enter to return...")
         elif choice in ("13", "quit", "exit", "q"):
-            print("Thank you for training with BlindChess.")
+            ui.print_success("Thank you for training with BlindChess.")
             break
         else:
-            print("Invalid selection. Please choose an option from 1 to 13.")
+            ui.print_warning("Invalid selection. Enter a number (1-12) or 'q' to quit.")
 
 
 def main(argv: Optional[list] = None) -> int:
