@@ -6,8 +6,22 @@ import time
 from typing import Optional
 import chess
 
+from blindchess.adaptive import (
+    CURRICULUM_LEVELS,
+    SKILL_DEFINITIONS,
+    AdaptiveEngine,
+    generate_adaptive_exercise,
+    generate_curriculum_exercise,
+)
 from blindchess.analysis import analyse_position
-from blindchess.blindfold import get_blindfold_exercise_by_level
+from blindchess.blindfold import (
+    STAGE_METADATA,
+    get_blindfold_exercise_by_category,
+    get_blindfold_exercise_by_level,
+    get_blindfold_exercise_by_stage,
+    get_stage_info,
+    normalize_square_list_input,
+)
 from blindchess.board_state import BoardState
 from blindchess.calculation import evaluate_calculation_attempt
 from blindchess.commands import get_help_text, is_command, parse_command
@@ -188,61 +202,559 @@ def run_game_loop(
 
 
 def run_blindfold_drills(config: AppConfig, db_mgr: Optional[DatabaseManager], level: int = 1) -> None:
-    """Run interactive blindfold spatial visualization exercises."""
+    """Run progressive blindfold chess training system with adaptive engine."""
     ui = TerminalUI(ascii_only=config.ascii_only)
     c = ui.palette
-    session = ActiveSession(mode="blindfold_drills", level=level, db_mgr=db_mgr)
-
-    ui.print_divider(f"Spatial Visualization Drills (Level {level})")
-    print(f"  {c.muted('Visualize the 64 squares internally. Type')} {c.accent_bold('quit')} {c.muted('to return to menu.')}\n")
-
-    solved = 0
-    total = 0
+    engine = AdaptiveEngine(db_mgr)
 
     while True:
-        drill = get_blindfold_exercise_by_level(level)
-        drill_lines = [
-            f"Category: {c.accent_bold(drill.category.replace('_', ' ').title())}",
+        ui.print_divider("Spatial Memory & Adaptive Progression System")
+        print(f"  {c.muted('Develop flawless internal board representation with an intelligent, self-calibrating engine.')}\n")
+
+        rows = []
+        for lvl in range(1, 11):
+            curr_info = CURRICULUM_LEVELS[lvl]
+            skill_id = curr_info["primary_skill"]
+            prof = engine.get_profile(skill_id)
+            diff_label = f"Diff {prof.current_difficulty}/10"
+
+            if prof.total_attempts > 0:
+                acc_label = f"{prof.recent_accuracy:.0f}% acc"
+                status_str = c.accent_bold(f"{diff_label} • {acc_label}")
+            else:
+                status_str = c.muted(f"{diff_label} • Untrained")
+
+            title_clean = curr_info["title"].split("— ")[1] if "— " in curr_info["title"] else curr_info["title"]
+            rows.append([f"[{lvl}]", title_clean, curr_info["subtitle"], status_str])
+
+        ui.print_table(["Level", "Curriculum Focus", "Description", "Adaptive Status"], rows)
+
+        ui.print_shortcut_bar([
+            ("a", "Adaptive Training (Auto)"),
+            ("1-10", "Train Curriculum Level"),
+            ("p", "Skill Ratings (All 9)"),
+            ("r", "Mistakes Practice"),
+            ("x", "Reset Progress"),
+            ("q", "Main Menu"),
+        ])
+        print()
+
+        choice = ui.prompt("Select option: ").lower().strip()
+
+        if choice in ("q", "quit", "exit"):
+            break
+        elif choice == "a":
+            _run_adaptive_exercise_session(config, ui, db_mgr, engine=engine)
+        elif choice == "p":
+            _display_skill_ratings(ui, engine)
+            ui.prompt("Press Enter to return...")
+        elif choice == "r":
+            _run_smart_mistakes_practice(config, ui, db_mgr)
+        elif choice == "x":
+            _handle_reset_adaptive_progress(ui, engine)
+        elif choice.isdigit() and 1 <= int(choice) <= 10:
+            lvl_num = int(choice)
+            _run_adaptive_exercise_session(config, ui, db_mgr, engine=engine, curriculum_level=lvl_num)
+        else:
+            ui.print_warning("Enter 'a' for adaptive training, 1-10 for curriculum level, 'p' for skill ratings, or 'q' to exit.")
+
+
+def _display_skill_ratings(ui: TerminalUI, engine: AdaptiveEngine) -> None:
+    """Display comprehensive ratings and proficiency breakdown for all 9 independent skills."""
+    c = ui.palette
+    ui.print_divider("Independent Skill Ratings & Proficiency")
+
+    rows = []
+    for skill_id, info in SKILL_DEFINITIONS.items():
+        p = engine.get_profile(skill_id)
+        solved_str = f"{p.total_solved} / {p.total_attempts}"
+        acc_str = f"{p.first_attempt_accuracy:.0f}%" if p.total_attempts > 0 else "N/A"
+        speed_str = f"{p.avg_response_time}s" if p.total_attempts > 0 else "N/A"
+        diff_str = f"{p.current_difficulty}/10"
+
+        if p.current_difficulty >= 8:
+            status_str = c.success_bold("Master")
+        elif p.current_difficulty >= 5:
+            status_str = c.accent_bold("Advanced")
+        elif p.total_attempts > 0:
+            status_str = c.highlight("Practicing")
+        else:
+            status_str = c.muted("Calibrating")
+
+        rows.append([
+            p.name,
+            diff_str,
+            f"{p.proficiency:.1f}%",
+            solved_str,
+            acc_str,
+            speed_str,
+            status_str,
+        ])
+
+    ui.print_table(
+        ["Skill Area", "Difficulty", "Proficiency", "Solved / Att", "First-Att %", "Avg Speed", "Rating Tier"],
+        rows,
+    )
+
+
+def _handle_reset_adaptive_progress(ui: TerminalUI, engine: AdaptiveEngine) -> None:
+    """Handle explicit, non-automatic reset of adaptive progress."""
+    ui.print_warning("Resetting will revert all 9 skills back to Level 1 and wipe adaptation history.")
+    ans = ui.prompt("Type 'CONFIRM' to proceed with reset: ").strip()
+    if ans == "CONFIRM":
+        engine.reset_all_progress()
+        ui.print_success("Adaptive progress has been reset to Level 1 across all skills.")
+    else:
+        ui.print_message("Reset cancelled.")
+    ui.prompt("Press Enter to continue...")
+
+
+def _run_adaptive_exercise_session(
+    config: AppConfig,
+    ui: TerminalUI,
+    db_mgr: Optional[DatabaseManager],
+    engine: AdaptiveEngine,
+    skill_id: Optional[str] = None,
+    curriculum_level: Optional[int] = None,
+    target_count: int = 5,
+) -> None:
+    """Execute an adaptive practice round that automatically calibrates difficulty."""
+    c = ui.palette
+
+    # Determine skill to train
+    if curriculum_level:
+        curr_info = CURRICULUM_LEVELS.get(curriculum_level, CURRICULUM_LEVELS[1])
+        target_skill = curr_info["primary_skill"]
+        round_title = curr_info["title"]
+    elif skill_id:
+        target_skill = skill_id
+        info = SKILL_DEFINITIONS.get(target_skill, {"name": target_skill})
+        round_title = f"Adaptive Drill: {info['name']}"
+    else:
+        # Auto-pick skill needing practice (lowest proficiency or least attempts)
+        sorted_skills = sorted(engine.profiles.values(), key=lambda p: (p.proficiency, p.total_attempts))
+        target_skill = sorted_skills[0].skill_id if sorted_skills else "knight_routes"
+        info = SKILL_DEFINITIONS.get(target_skill, {"name": target_skill})
+        round_title = f"Adaptive Training: {info['name']}"
+
+    profile = engine.get_profile(target_skill)
+    session = ActiveSession(mode="spatial", level=profile.current_difficulty, db_mgr=db_mgr)
+
+    ui.print_divider(round_title)
+
+    # Render compact status card requested in Requirement 9
+    recent_corr = sum(1 for x in profile.recent_first_attempts[-10:] if x)
+    recent_total = len(profile.recent_first_attempts[-10:])
+    recent_acc_str = f"{recent_corr}/{recent_total}" if recent_total > 0 else "0/0"
+    hints_in_recent = sum(profile.recent_hints[-10:]) if profile.recent_hints else 0
+
+    status_card_lines = [
+        f"Skill: {c.accent_bold(profile.name)}",
+        f"Difficulty: {c.highlight(f'{profile.current_difficulty}/10')}",
+        f"Recent accuracy: {c.highlight(recent_acc_str)}",
+        f"First-attempt accuracy: {c.highlight(f'{profile.first_attempt_accuracy:.0f}%')}",
+        f"Hints used (recent): {hints_in_recent}",
+        f"Next objective: {c.muted(profile.get_next_objective())}",
+    ]
+    print("\n" + ui.render_panel("Spatial Memory Drills — Status", status_card_lines, width=64, border_style="accent") + "\n")
+
+    recent_seen_ids: Set[str] = set(profile.recent_exercise_ids[-10:])
+    solved_in_round = 0
+    total_time_round = 0.0
+
+    for idx in range(1, target_count + 1):
+        if curriculum_level:
+            drill = generate_curriculum_exercise(curriculum_level, exclude_ids=recent_seen_ids)
+        else:
+            drill = generate_adaptive_exercise(target_skill, difficulty=profile.current_difficulty, exclude_ids=recent_seen_ids)
+
+        recent_seen_ids.add(drill.id)
+
+        print(f" {c.accent_bold(f'--- Exercise {idx}/{target_count} [Difficulty {profile.current_difficulty}/10] ---')}")
+
+        if drill.initial_board_description:
+            mem_lines = [
+                c.highlight("Mentally commit this position to memory (DO NOT write it down):"),
+                "",
+                drill.initial_board_description,
+            ]
+            print(ui.render_panel("Mental Position Memorization", mem_lines, width=74, border_style="accent"))
+            ui.prompt("Press Enter once you have visualized and memorized the layout...")
+            print("\n" * 3)
+
+        drill_card_lines = [
+            f"Skill:    {c.highlight(profile.name)}   [Tier: {profile.current_difficulty}/10]",
+            f"Concept:  {c.muted(drill.category.replace('_', ' ').title())}",
             "",
             drill.prompt,
         ]
-        card = ui.render_panel(f"Exercise: {drill.title}", drill_lines, width=72, border_style="accent")
-        print("\n" + card + "\n")
-        ui.print_shortcut_bar([("hint", "Hint"), ("skip", "Skip"), ("quit", "Menu")])
+        card = ui.render_panel(drill.title, drill_card_lines, width=74, border_style="muted")
+        print(card + "\n")
+        ui.print_shortcut_bar([("hint", "Hint"), ("skip", "Skip/Reveal"), ("quit", "Exit Round")])
         print()
 
+        start_time = time.time()
         hints_used = 0
+        attempts = 0
+        was_revealed = False
+
         while True:
-            ans = ui.prompt("Your answer: ").strip().lower()
-            if ans == "quit":
+            ans = ui.prompt(f"[{c.accent(profile.name)} (L{profile.current_difficulty})] ❯ ").strip().lower()
+
+            if ans in ("q", "quit"):
+                session.close(notes=f"Aborted round during exercise {idx}")
+                ui.print_message("Round exited.")
+                return
+
+            if ans == "hint":
+                hints_used += 1
+                session.record_hint()
+                ui.print_warning(f"Hint: {drill.hint}")
+                continue
+
+            resp_time = round(time.time() - start_time, 1)
+
+            if ans in ("skip", "reveal"):
+                was_revealed = True
+                total_time_round += resp_time
+                ui.print_message(f"Solution: {drill.explanation}\n", prefix="Revealed")
+
+                promo_res = engine.record_attempt(
+                    skill_id=target_skill,
+                    exercise_id=drill.id,
+                    is_first_attempt=(attempts == 0),
+                    is_correct=False,
+                    hints_used=hints_used,
+                    response_time=resp_time,
+                    was_revealed=True,
+                    concept_key=drill.category,
+                    session_id=session.session_id,
+                )
+                if promo_res.action == "demoted":
+                    ui.print_warning(f"\n▼ {promo_res.message}\n")
                 break
+
+            attempts += 1
+            is_first = (attempts == 1)
+
+            # Evaluate answer
+            matches = False
+            if ans in [corr.lower() for corr in drill.correct_answers]:
+                matches = True
+            elif drill.expected_square_set:
+                user_squares = normalize_square_list_input(ans)
+                if user_squares and user_squares == drill.expected_square_set:
+                    matches = True
+
+            if matches:
+                solved_in_round += 1
+                total_time_round += resp_time
+                if is_first and hints_used == 0:
+                    ui.print_success(f"✓ Correct on first attempt! ({resp_time}s) {drill.explanation}\n")
+                elif hints_used > 0:
+                    ui.print_success(f"✓ Correct with {hints_used} hint(s)! ({resp_time}s) {drill.explanation}\n")
+                else:
+                    ui.print_success(f"✓ Correct on retry {attempts}! ({resp_time}s) {drill.explanation}\n")
+
+                promo_res = engine.record_attempt(
+                    skill_id=target_skill,
+                    exercise_id=drill.id,
+                    is_first_attempt=is_first,
+                    is_correct=True,
+                    hints_used=hints_used,
+                    response_time=resp_time,
+                    was_revealed=False,
+                    concept_key=drill.category,
+                    session_id=session.session_id,
+                )
+                if promo_res.action == "promoted":
+                    ui.print_success(f"\n★ {promo_res.message}\n")
+                elif promo_res.action == "demoted":
+                    ui.print_warning(f"\n▼ {promo_res.message}\n")
+
+                if db_mgr:
+                    db_mgr.record_spatial_drill(
+                        session_id=session.session_id,
+                        stage=curriculum_level or profile.current_difficulty,
+                        stage_name=profile.name,
+                        category=drill.category,
+                        exercise_id=drill.id,
+                        solved=True,
+                        attempts=attempts,
+                        hints_used=hints_used,
+                        response_time_seconds=resp_time,
+                        user_answer=ans,
+                    )
+                break
+            else:
+                if is_first:
+                    # Record first-attempt failure into adaptive engine immediately
+                    promo_res = engine.record_attempt(
+                        skill_id=target_skill,
+                        exercise_id=drill.id,
+                        is_first_attempt=True,
+                        is_correct=False,
+                        hints_used=hints_used,
+                        response_time=resp_time,
+                        was_revealed=False,
+                        concept_key=drill.category,
+                        session_id=session.session_id,
+                    )
+                    if promo_res.action == "demoted":
+                        ui.print_warning(f"\n▼ {promo_res.message}\n")
+                ui.print_warning("Incorrect answer. Re-visualize the geometry and retry, or type 'hint' / 'skip'.")
+
+    # Round Summary
+    acc = round((solved_in_round / target_count) * 100.0, 1) if target_count > 0 else 0.0
+    avg_t = round(total_time_round / target_count, 1) if target_count > 0 else 0.0
+
+    summary_lines = [
+        f"Skill Trained:      {profile.name}",
+        f"Round Score:        {solved_in_round} / {target_count} ({acc}%)",
+        f"Current Difficulty: Level {profile.current_difficulty}/10",
+        f"First-Attempt Acc:  {profile.first_attempt_accuracy:.0f}%",
+        f"Avg Response Speed: {avg_t}s",
+    ]
+    print(ui.render_panel("Adaptive Round Summary", summary_lines, width=64, border_style="accent") + "\n")
+    session.close(notes=f"Adaptive round for {target_skill}: {solved_in_round}/{target_count} ({acc}%)")
+    ui.prompt("Press Enter to continue...")
+
+
+def _run_stage_session(
+    config: AppConfig,
+    ui: TerminalUI,
+    db_mgr: Optional[DatabaseManager],
+    stage_num: int,
+    target_count: int = 5,
+) -> None:
+    """Execute a focused practice round for a specific stage."""
+    c = ui.palette
+    info = get_stage_info(stage_num)
+    session = ActiveSession(mode="spatial", level=stage_num, db_mgr=db_mgr)
+
+    ui.print_divider(f"Stage {stage_num}: {info['title']}")
+    print(f"  {c.muted(info['description'])}\n")
+    print(f"  {c.muted('Round target: ')}{c.highlight(str(target_count))}{c.muted(' exercises. Board remains strictly hidden.')}\n")
+
+    solved_count = 0
+    total_time = 0.0
+
+    for idx in range(1, target_count + 1):
+        drill = get_blindfold_exercise_by_stage(stage_num)
+        print(f" {c.accent_bold(f'--- Exercise {idx}/{target_count} ---')}")
+
+        # If Stage 5 (position memory), show memorization step first
+        if drill.initial_board_description:
+            mem_lines = [
+                c.highlight("Mentally commit this position to memory (DO NOT write it down):"),
+                "",
+                drill.initial_board_description,
+            ]
+            print(ui.render_panel("Mental Position Memorization", mem_lines, width=74, border_style="accent"))
+            ui.prompt("Press Enter once you have visualized and memorized the layout...")
+            print("\n" * 3)  # Push memorization card off immediate view
+
+        drill_card_lines = [
+            f"Category: {c.highlight(drill.category.replace('_', ' ').title())}",
+            "",
+            drill.prompt,
+        ]
+        card = ui.render_panel(drill.title, drill_card_lines, width=74, border_style="muted")
+        print(card + "\n")
+        ui.print_shortcut_bar([("hint", "Hint"), ("skip", "Skip"), ("quit", "Abort Round")])
+        print()
+
+        start_time = time.time()
+        hints_used = 0
+        attempts = 0
+        is_solved = False
+
+        while True:
+            attempts += 1
+            ans = ui.prompt(f"[{c.accent(f'Stage {stage_num}')}] ❯ ").strip().lower()
+
+            if ans in ("q", "quit"):
+                session.close(notes=f"Aborted during exercise {idx}")
+                ui.print_message("Round aborted by user.")
+                return
+
             if ans == "hint":
                 hints_used += 1
                 session.record_hint()
                 ui.print_warning(drill.hint)
                 continue
 
+            resp_time = round(time.time() - start_time, 1)
+
+            # Evaluate answer
+            matches = False
             if ans in [corr.lower() for corr in drill.correct_answers]:
-                ui.print_success(f"Correct! {drill.explanation}")
-                solved += 1
-                total += 1
+                matches = True
+            elif drill.expected_square_set:
+                user_squares = normalize_square_list_input(ans)
+                if user_squares and user_squares == drill.expected_square_set:
+                    matches = True
+
+            if matches:
+                is_solved = True
+                solved_count += 1
+                total_time += resp_time
+                ui.print_success(f"Correct! ({resp_time}s) {drill.explanation}\n")
                 if db_mgr:
-                    db_mgr.record_tactical_result(session.session_id, drill.id, drill.category, True, hints_used)
+                    db_mgr.record_spatial_drill(
+                        session_id=session.session_id,
+                        stage=stage_num,
+                        stage_name=info["title"],
+                        category=drill.category,
+                        exercise_id=drill.id,
+                        solved=True,
+                        attempts=attempts,
+                        hints_used=hints_used,
+                        response_time_seconds=resp_time,
+                        user_answer=ans,
+                    )
                 break
             else:
                 if ans == "skip":
-                    ui.print_message(f"Solution: {drill.explanation}", prefix="Revealed")
-                    total += 1
+                    total_time += resp_time
+                    ui.print_message(f"Solution: {drill.explanation}\n", prefix="Revealed")
                     if db_mgr:
-                        db_mgr.record_tactical_result(session.session_id, drill.id, drill.category, False, hints_used)
+                        db_mgr.record_spatial_drill(
+                            session_id=session.session_id,
+                            stage=stage_num,
+                            stage_name=info["title"],
+                            category=drill.category,
+                            exercise_id=drill.id,
+                            solved=False,
+                            attempts=attempts,
+                            hints_used=hints_used,
+                            response_time_seconds=resp_time,
+                            user_answer=ans,
+                            error_reason=f"Skipped after incorrect: {ans}",
+                        )
                     break
-                ui.print_warning("Incorrect attempt. Re-visualize and try again, or type 'hint' / 'skip'.")
+                ui.print_warning("Incorrect answer. Re-visualize the geometry and retry, or type 'hint' / 'skip'.")
 
-        if ans == "quit":
-            break
+    # Round Summary Scorecard
+    acc = round((solved_count / target_count) * 100.0, 1) if target_count > 0 else 0.0
+    avg_t = round(total_time / target_count, 1) if target_count > 0 else 0.0
 
-    session.close(notes=f"Solved {solved}/{total} drills.")
-    ui.print_message(f"Drill session complete. Accuracy: {solved}/{total} solved.", prefix="Summary")
+    if db_mgr:
+        db_mgr.update_spatial_stage_mastery(stage_num, info["title"], solved_count, target_count, acc)
+
+    scorecard_lines = [
+        f"Score:         {c.highlight(f'{solved_count} / {target_count}')} ({acc}%)",
+        f"Avg Speed:     {avg_t} seconds per exercise",
+    ]
+
+    if acc >= 80.0:
+        scorecard_lines.append(c.success_bold("★ STAGE MASTERY ACHIEVED! Next stage unlocked."))
+    else:
+        scorecard_lines.append(c.warning(f"Mastery requires >= 80% accuracy. Continue practicing Stage {stage_num}."))
+
+    print(ui.render_panel(f"Stage {stage_num} Round Scorecard", scorecard_lines, width=64, border_style="success" if acc >= 80 else "accent") + "\n")
+    session.close(notes=f"Completed stage {stage_num}: {solved_count}/{target_count} ({acc}%)")
+    ui.prompt("Press Enter to continue...")
+
+
+def _run_smart_mistakes_practice(config: AppConfig, ui: TerminalUI, db_mgr: Optional[DatabaseManager]) -> None:
+    """Serve targeted exercises for categories where user has previously erred."""
+    c = ui.palette
+    if not db_mgr:
+        ui.print_warning("Database not available for mistake analysis.")
+        return
+
+    errors = db_mgr.get_recurring_spatial_errors(limit=5)
+    if not errors:
+        ui.print_success("No recurring mistake patterns found in database! Choose any stage to train.")
+        ui.prompt("Press Enter to continue...")
+        return
+
+    ui.print_divider("Smart Practice: Recurring Mistakes Focus")
+    print(f"  {c.muted('Serving targeted exercises based on your recorded error history:')}\n")
+
+    error_cats = [e["category"] for e in errors]
+    solved = 0
+    total = len(error_cats)
+
+    for idx, cat in enumerate(error_cats, start=1):
+        drill = get_blindfold_exercise_by_category(cat)
+        if not drill:
+            continue
+
+        print(f" {c.accent_bold(f'--- Practice Drill {idx}/{total} [{drill.category}] ---')}")
+        card_lines = [
+            f"Focus Stage: {c.highlight(f'Stage {drill.stage}')}",
+            f"Category:    {c.warning_bold(drill.category.replace('_', ' ').title())}",
+            "",
+            drill.prompt,
+        ]
+        print(ui.render_panel("Targeted Error Drill", card_lines, width=74, border_style="warning") + "\n")
+        ui.print_shortcut_bar([("hint", "Hint"), ("skip", "Skip"), ("quit", "Exit")])
+        print()
+
+        start_time = time.time()
+        while True:
+            ans = ui.prompt("Your answer: ").strip().lower()
+            if ans in ("q", "quit"):
+                return
+            if ans == "hint":
+                ui.print_warning(drill.hint)
+                continue
+            if ans in [corr.lower() for corr in drill.correct_answers]:
+                ui.print_success(f"Excellent! You conquered this motif. {drill.explanation}\n")
+                solved += 1
+                break
+            else:
+                if ans == "skip":
+                    ui.print_message(f"Solution: {drill.explanation}\n", prefix="Revealed")
+                    break
+                ui.print_warning("Not quite. Re-visualize carefully, or type 'hint' / 'skip'.")
+
+    ui.print_message(f"Targeted review complete: {solved}/{total} solved.", prefix="Smart Practice")
+    ui.prompt("Press Enter to continue...")
+
+
+def _display_spatial_statistics(ui: TerminalUI, db_mgr: Optional[DatabaseManager]) -> None:
+    """Display detailed stage progress, completion metrics, and recurring error categories."""
+    c = ui.palette
+    if not db_mgr:
+        ui.print_warning("Database not available.")
+        return
+
+    stages = db_mgr.get_all_spatial_stage_mastery()
+    errors = db_mgr.get_recurring_spatial_errors(limit=5)
+
+    ui.print_divider("Blindfold Stage Mastery & Error Analysis")
+
+    rows = []
+    for s in stages:
+        acc = f"{s['best_accuracy']:.1f}%" if s["total_attempted"] > 0 else "N/A"
+        status = c.success_bold("Mastered") if s["completed"] else (c.accent("Unlocked") if s["unlocked"] else c.muted("Locked"))
+        rows.append([
+            f"Stage {s['stage']}",
+            s["stage_name"],
+            str(s["total_solved"]),
+            str(s["total_attempted"]),
+            acc,
+            status,
+        ])
+    ui.print_table(["Stage", "Focus Area", "Solved", "Attempted", "Best Accuracy", "Status"], rows)
+
+    if errors:
+        ui.print_divider("Recurring Mistake Categories (Targeted Review Areas)")
+        err_rows = []
+        for e in errors:
+            err_rows.append([
+                f"Stage {e['stage']}",
+                e["category"].replace("_", " ").title(),
+                str(e["failed_attempts"]),
+                str(e["total_attempts"]),
+                f"{e['avg_time']}s",
+            ])
+        ui.print_table(["Stage", "Error Category", "Mistakes", "Total Attempts", "Avg Response Time"], err_rows)
+    else:
+        ui.print_success("No recurring error categories recorded yet.")
 
 
 def run_tactics_trainer(config: AppConfig, db_mgr: Optional[DatabaseManager]) -> None:
@@ -415,7 +927,7 @@ def run_variation_explorer(config: AppConfig, engine_mgr: Optional[EngineManager
         turn_str = "White" if cur_board.turn == chess.WHITE else "Black"
 
         print(f" {c.muted('Line:')} {c.highlight(line_str)}")
-        print(f" {c.muted('Turn:')} {c.accent_bold(turn_str)} (Move {cur_board.move_number}.)")
+        print(f" {c.muted('Turn:')} {c.accent_bold(turn_str)} (Move {cur_board.fullmove_number}.)")
 
         cmd_in = ui.prompt("var-explorer ❯ ")
         if cmd_in in ("quit", "exit"):

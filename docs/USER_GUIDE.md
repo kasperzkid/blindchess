@@ -11,8 +11,9 @@ Launch the interactive main menu:
 blindchess
 ```
 You will be presented with the main menu:
+
 ```text
-Choose a mode:
+BlindChess — Main Menu (numeric order)
 
  1. Blindfold Game (Board Hidden)
  2. Strength-Based Opponent (Play Stockfish)

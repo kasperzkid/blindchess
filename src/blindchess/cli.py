@@ -49,6 +49,7 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
             "menu",
             "blindfold",
             "play",
+            "spatial",
             "calculate",
             "variations",
             "strategy",
@@ -175,36 +176,26 @@ def interactive_main_menu(
             training_level=config.training_level,
         )
 
-        # Categorized, clean menu panels
-        col1_title = c.highlight("SPARRING & DRILLS")
-        col2_title = c.highlight("CALCULATION & REASONING")
-        col3_title = c.highlight("ANALYSIS & PROGRESS")
+        # Structured, numeric-ordered menu list
+        items = [
+            ("1", "Blindfold Game"),
+            ("2", "Play vs Stockfish"),
+            ("3", "Spatial Memory Drills"),
+            ("4", "Candidate Calculation"),
+            ("5", "Variation Explorer"),
+            ("6", "Strategic Position Coach"),
+            ("7", "Tactical Training (Puzzles)"),
+            ("8", "Opening Repertoires"),
+            ("9", "Endgame Fundamentals"),
+            ("10", "Game Diagnostic Review"),
+            ("11", "Training Statistics"),
+            ("12", "System Configuration"),
+        ]
 
-        print(f"  {col1_title:<32} {col2_title:<36} {col3_title}")
-        print(f"  {c.muted('─'*24):<32} {c.muted('─'*28):<36} {c.muted('─'*24)}")
-
-        row1 = (
-            f"  {c.muted('[')}{c.accent_bold('1')}{c.muted(']')} Blindfold Game          "
-            f"{c.muted('[')}{c.accent_bold('4')}{c.muted(']')} Candidate Calculation      "
-            f"{c.muted('[')}{c.accent_bold('5')}{c.muted(']')} Variation Explorer"
-        )
-        row2 = (
-            f"  {c.muted('[')}{c.accent_bold('2')}{c.muted(']')} Play vs Stockfish       "
-            f"{c.muted('[')}{c.accent_bold('6')}{c.muted(']')} Strategic Position Coach   "
-            f"{c.muted('[')}{c.accent_bold('10')}{c.muted(']')} Game Diagnostic Review"
-        )
-        row3 = (
-            f"  {c.muted('[')}{c.accent_bold('8')}{c.muted(']')} Opening Repertoires     "
-            f"{c.muted('[')}{c.accent_bold('7')}{c.muted(']')} Tactical Training (Puzzles)"
-            f" {c.muted('[')}{c.accent_bold('11')}{c.muted(']')} Training Statistics"
-        )
-        row4 = (
-            f"  {c.muted('[')}{c.accent_bold('9')}{c.muted(']')} Endgame Fundamentals    "
-            f"{c.muted('[')}{c.accent_bold('3')}{c.muted(']')} Spatial Memory Drills      "
-            f"{c.muted('[')}{c.accent_bold('12')}{c.muted(']')} System Configuration"
-        )
-
-        print(f"{row1}\n{row2}\n{row3}\n{row4}\n")
+        lines = []
+        for num, label in items:
+            lines.append(f"  {c.muted('[')}{c.accent_bold(num)}{c.muted(']')} {label}")
+        print("\n".join(lines) + "\n")
         ui.print_shortcut_bar([
             ("1-12", "Select Mode"),
             ("q", "Quit"),
@@ -336,6 +327,8 @@ def main(argv: Optional[list] = None) -> int:
                 show_board=(config.board_visibility == "normal"),
                 strict_blindfold=config.strict_blindfold,
             )
+        elif args.mode == "spatial":
+            run_blindfold_drills(config, db_mgr, level=config.training_level)
         elif args.mode == "calculate":
             run_calculation_trainer(config, engine_mgr, db_mgr)
         elif args.mode == "variations":

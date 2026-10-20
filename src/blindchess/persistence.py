@@ -96,10 +96,109 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             );
         """)
 
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS spatial_drills (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER,
+                created_at TEXT NOT NULL,
+                stage INTEGER NOT NULL,
+                stage_name TEXT NOT NULL,
+                category TEXT NOT NULL,
+                exercise_id TEXT NOT NULL,
+                solved INTEGER NOT NULL,
+                attempts INTEGER DEFAULT 1,
+                hints_used INTEGER DEFAULT 0,
+                response_time_seconds REAL DEFAULT 0,
+                user_answer TEXT,
+                error_reason TEXT,
+                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS spatial_stage_mastery (
+                stage INTEGER PRIMARY KEY,
+                stage_name TEXT NOT NULL,
+                unlocked INTEGER DEFAULT 1,
+                completed INTEGER DEFAULT 0,
+                total_attempted INTEGER DEFAULT 0,
+                total_solved INTEGER DEFAULT 0,
+                best_accuracy REAL DEFAULT 0,
+                last_trained_at TEXT
+            );
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS adaptive_skill_profiles (
+                skill_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                current_difficulty INTEGER DEFAULT 1,
+                proficiency REAL DEFAULT 0.0,
+                total_attempts INTEGER DEFAULT 0,
+                first_attempt_successes INTEGER DEFAULT 0,
+                total_solved INTEGER DEFAULT 0,
+                total_hints INTEGER DEFAULT 0,
+                total_response_time REAL DEFAULT 0.0,
+                recent_history_json TEXT DEFAULT '[]',
+                mastered_concepts_json TEXT DEFAULT '[]',
+                last_trained_at TEXT
+            );
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS adaptive_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER,
+                created_at TEXT NOT NULL,
+                skill_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                old_difficulty INTEGER,
+                new_difficulty INTEGER,
+                reason TEXT,
+                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
+            );
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS adaptive_spaced_repetition (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                skill_id TEXT NOT NULL,
+                concept_key TEXT NOT NULL,
+                due_at TEXT NOT NULL,
+                interval_days INTEGER DEFAULT 1,
+                repetitions INTEGER DEFAULT 0,
+                UNIQUE(skill_id, concept_key)
+            );
+        """)
+
         # Performance indices
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_mode ON sessions(mode);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tactics_theme ON tactical_results(theme);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_calc_session ON calculation_drills(session_id);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_spatial_stage ON spatial_drills(stage);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_spatial_category ON spatial_drills(category);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_adaptive_skill ON adaptive_skill_profiles(skill_id);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_adaptive_events ON adaptive_events(skill_id);")
+
+        # Initialize default stages in spatial_stage_mastery if empty
+        cur = conn.execute("SELECT COUNT(*) FROM spatial_stage_mastery;")
+        if cur.fetchone()[0] == 0:
+            default_stages = [
+                (1, "Coordinates & Colors", 1),
+                (2, "Piece Movement & Legal Targets", 0),
+                (3, "Knight Movement & Routes", 0),
+                (4, "Multi-Piece Spatial Visualization", 0),
+                (5, "Position Memory & Reconstruction", 0),
+                (6, "Move-Sequence Tracking", 0),
+                (7, "Blindfold Tactical Calculation", 0),
+            ]
+            for st, name, unl in default_stages:
+                conn.execute(
+                    """INSERT INTO spatial_stage_mastery
+                       (stage, stage_name, unlocked, completed, total_attempted, total_solved, best_accuracy, last_trained_at)
+                       VALUES (?, ?, ?, 0, 0, 0, 0.0, ?)""",
+                    (st, name, unl, datetime.now().isoformat()),
+                )
 
         # Set version if not present
         cur = conn.execute("SELECT version FROM schema_meta WHERE version = ?", (CURRENT_SCHEMA_VERSION,))
@@ -242,6 +341,114 @@ class DatabaseManager:
             )
             return cur.lastrowid  # type: ignore
 
+    def record_spatial_drill(
+        self,
+        session_id: Optional[int],
+        stage: int,
+        stage_name: str,
+        category: str,
+        exercise_id: str,
+        solved: bool,
+        attempts: int = 1,
+        hints_used: int = 0,
+        response_time_seconds: float = 0.0,
+        user_answer: Optional[str] = None,
+        error_reason: Optional[str] = None,
+    ) -> None:
+        """Record the attempt and outcome of a spatial memory drill."""
+        with self.conn:
+            self.conn.execute(
+                """INSERT INTO spatial_drills
+                   (session_id, created_at, stage, stage_name, category, exercise_id,
+                    solved, attempts, hints_used, response_time_seconds, user_answer, error_reason)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    session_id,
+                    datetime.now().isoformat(),
+                    stage,
+                    stage_name,
+                    category,
+                    exercise_id,
+                    1 if solved else 0,
+                    attempts,
+                    hints_used,
+                    response_time_seconds,
+                    user_answer,
+                    error_reason,
+                ),
+            )
+
+    def get_all_spatial_stage_mastery(self) -> List[Dict[str, Any]]:
+        """Retrieve progress and mastery statistics for all 7 blindfold stages."""
+        cur = self.conn.execute("""
+            SELECT stage, stage_name, unlocked, completed, total_attempted, total_solved,
+                   best_accuracy, last_trained_at
+            FROM spatial_stage_mastery
+            ORDER BY stage ASC;
+        """)
+        results = []
+        for row in cur.fetchall():
+            results.append({
+                "stage": row["stage"],
+                "stage_name": row["stage_name"],
+                "unlocked": bool(row["unlocked"]),
+                "completed": bool(row["completed"]),
+                "total_attempted": row["total_attempted"],
+                "total_solved": row["total_solved"],
+                "best_accuracy": row["best_accuracy"],
+                "last_trained_at": row["last_trained_at"],
+            })
+        return results
+
+    def update_spatial_stage_mastery(
+        self,
+        stage: int,
+        stage_name: str,
+        solved_count: int,
+        attempted_count: int,
+        session_accuracy: float,
+    ) -> None:
+        """Update mastery status and unlock subsequent stages upon mastery (>=80% accuracy)."""
+        now = datetime.now().isoformat()
+        is_completed = 1 if (session_accuracy >= 80.0 and attempted_count >= 5) else 0
+
+        with self.conn:
+            # Update current stage
+            self.conn.execute(
+                """UPDATE spatial_stage_mastery
+                   SET total_attempted = total_attempted + ?,
+                       total_solved = total_solved + ?,
+                       best_accuracy = MAX(best_accuracy, ?),
+                       completed = CASE WHEN completed = 1 THEN 1 ELSE ? END,
+                       last_trained_at = ?
+                   WHERE stage = ?""",
+                (attempted_count, solved_count, session_accuracy, is_completed, now, stage),
+            )
+
+            # If completed, unlock next stage
+            if is_completed and stage < 7:
+                self.conn.execute(
+                    """UPDATE spatial_stage_mastery
+                       SET unlocked = 1
+                       WHERE stage = ?""",
+                    (stage + 1,),
+                )
+
+    def get_recurring_spatial_errors(self, limit: int = 5) -> List[Dict[str, Any]]:
+        """Retrieve categories where user has the highest error rates."""
+        cur = self.conn.execute("""
+            SELECT category, stage, stage_name,
+                   COUNT(*) as total_attempts,
+                   SUM(CASE WHEN solved = 0 THEN 1 ELSE 0 END) as failed_attempts,
+                   ROUND(AVG(response_time_seconds), 1) as avg_time
+            FROM spatial_drills
+            GROUP BY category
+            HAVING failed_attempts > 0
+            ORDER BY failed_attempts DESC, total_attempts DESC
+            LIMIT ?;
+        """, (limit,))
+        return [dict(row) for row in cur.fetchall()]
+
     def backup_database(self, custom_path: Optional[Path] = None) -> Path:
         """Create a timestamped SQLite database backup file."""
         backup_dir = get_backup_dir() if custom_path is None else custom_path.parent
@@ -259,4 +466,174 @@ class DatabaseManager:
             self.conn.execute("DELETE FROM saved_games;")
             self.conn.execute("DELETE FROM tactical_results;")
             self.conn.execute("DELETE FROM calculation_drills;")
+            self.conn.execute("DELETE FROM spatial_drills;")
+            self.conn.execute("""
+                UPDATE spatial_stage_mastery
+                SET completed = 0, total_attempted = 0, total_solved = 0, best_accuracy = 0.0,
+                    unlocked = CASE WHEN stage = 1 THEN 1 ELSE 0 END;
+            """)
+            self.conn.execute("DELETE FROM adaptive_events;")
+            self.conn.execute("DELETE FROM adaptive_spaced_repetition;")
+            self.conn.execute("DELETE FROM adaptive_skill_profiles;")
             self.conn.execute("DELETE FROM sessions;")
+
+    def save_skill_profile(self, profile: Any) -> None:
+        """Persist or update an adaptive skill profile."""
+        recent_data = {
+            "first_attempts": getattr(profile, "recent_first_attempts", []),
+            "hints": getattr(profile, "recent_hints", []),
+            "exercise_ids": getattr(profile, "recent_exercise_ids", []),
+            "mistakes": getattr(profile, "recent_mistakes", []),
+        }
+        recent_json = json.dumps(recent_data)
+        mastered_list = list(getattr(profile, "mastered_concepts", set()))
+        mastered_json = json.dumps(mastered_list)
+
+        with self.conn:
+            self.conn.execute(
+                """INSERT INTO adaptive_skill_profiles
+                   (skill_id, name, current_difficulty, proficiency, total_attempts,
+                    first_attempt_successes, total_solved, total_hints, total_response_time,
+                    recent_history_json, mastered_concepts_json, last_trained_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(skill_id) DO UPDATE SET
+                    name = excluded.name,
+                    current_difficulty = excluded.current_difficulty,
+                    proficiency = excluded.proficiency,
+                    total_attempts = excluded.total_attempts,
+                    first_attempt_successes = excluded.first_attempt_successes,
+                    total_solved = excluded.total_solved,
+                    total_hints = excluded.total_hints,
+                    total_response_time = excluded.total_response_time,
+                    recent_history_json = excluded.recent_history_json,
+                    mastered_concepts_json = excluded.mastered_concepts_json,
+                    last_trained_at = excluded.last_trained_at;
+                """,
+                (
+                    profile.skill_id,
+                    profile.name,
+                    profile.current_difficulty,
+                    profile.proficiency,
+                    profile.total_attempts,
+                    profile.first_attempt_successes,
+                    profile.total_solved,
+                    profile.total_hints,
+                    profile.total_response_time,
+                    recent_json,
+                    mastered_json,
+                    profile.last_trained_at or datetime.now().isoformat(),
+                ),
+            )
+
+    def get_skill_profile(self, skill_id: str) -> Optional[Any]:
+        """Load skill profile from database with graceful corruption recovery."""
+        from blindchess.adaptive import SkillProfile
+        cur = self.conn.execute(
+            """SELECT skill_id, name, current_difficulty, proficiency, total_attempts,
+                      first_attempt_successes, total_solved, total_hints, total_response_time,
+                      recent_history_json, mastered_concepts_json, last_trained_at
+               FROM adaptive_skill_profiles
+               WHERE skill_id = ?;""",
+            (skill_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+
+        recent_first = []
+        recent_hints = []
+        recent_ids = []
+        recent_mistakes = []
+        try:
+            r_data = json.loads(row["recent_history_json"] or "{}")
+            if isinstance(r_data, dict):
+                recent_first = r_data.get("first_attempts", [])
+                recent_hints = r_data.get("hints", [])
+                recent_ids = r_data.get("exercise_ids", [])
+                recent_mistakes = r_data.get("mistakes", [])
+            elif isinstance(r_data, list):
+                recent_first = r_data
+        except Exception:
+            pass
+
+        mastered = set()
+        try:
+            m_list = json.loads(row["mastered_concepts_json"] or "[]")
+            if isinstance(m_list, list):
+                mastered = set(m_list)
+        except Exception:
+            pass
+
+        return SkillProfile(
+            skill_id=row["skill_id"],
+            name=row["name"],
+            current_difficulty=row["current_difficulty"],
+            proficiency=row["proficiency"],
+            total_attempts=row["total_attempts"],
+            first_attempt_successes=row["first_attempt_successes"],
+            total_solved=row["total_solved"],
+            total_hints=row["total_hints"],
+            total_response_time=row["total_response_time"],
+            recent_first_attempts=recent_first,
+            recent_hints=recent_hints,
+            recent_exercise_ids=recent_ids,
+            recent_mistakes=recent_mistakes,
+            mastered_concepts=mastered,
+            last_trained_at=row["last_trained_at"],
+        )
+
+    def get_all_skill_profiles(self) -> Dict[str, Any]:
+        """Retrieve all adaptive skill profiles."""
+        cur = self.conn.execute("SELECT skill_id FROM adaptive_skill_profiles;")
+        profiles = {}
+        for row in cur.fetchall():
+            p = self.get_skill_profile(row["skill_id"])
+            if p:
+                profiles[p.skill_id] = p
+        return profiles
+
+    def record_adaptive_event(
+        self,
+        skill_id: str,
+        event_type: str,
+        old_diff: int,
+        new_diff: int,
+        reason: str,
+        session_id: Optional[int] = None,
+    ) -> None:
+        """Log a promotion or demotion event."""
+        with self.conn:
+            self.conn.execute(
+                """INSERT INTO adaptive_events
+                   (session_id, created_at, skill_id, event_type, old_difficulty, new_difficulty, reason)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (session_id, datetime.now().isoformat(), skill_id, event_type, old_diff, new_diff, reason),
+            )
+
+    def get_adaptive_events(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """Retrieve recent promotion/demotion events."""
+        cur = self.conn.execute("""
+            SELECT id, session_id, created_at, skill_id, event_type, old_difficulty, new_difficulty, reason
+            FROM adaptive_events
+            ORDER BY id DESC
+            LIMIT ?;
+        """, (limit,))
+        return [dict(row) for row in cur.fetchall()]
+
+    def reset_adaptive_progress(self) -> None:
+        """Reset all adaptive skill ratings back to Level 1 and wipe adaptive history."""
+        with self.conn:
+            self.conn.execute("DELETE FROM adaptive_events;")
+            self.conn.execute("DELETE FROM adaptive_spaced_repetition;")
+            self.conn.execute("""
+                UPDATE adaptive_skill_profiles
+                SET current_difficulty = 1,
+                    proficiency = 0.0,
+                    total_attempts = 0,
+                    first_attempt_successes = 0,
+                    total_solved = 0,
+                    total_hints = 0,
+                    total_response_time = 0.0,
+                    recent_history_json = '[]',
+                    mastered_concepts_json = '[]';
+            """)
