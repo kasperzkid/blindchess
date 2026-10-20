@@ -36,6 +36,14 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--version",
+        "-V",
+        action="version",
+        version="blindchess 1.0.0",
+        help="Show program's version number and exit",
+    )
+
+    parser.add_argument(
         "--mode",
         choices=[
             "menu",
