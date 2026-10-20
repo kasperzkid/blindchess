@@ -185,7 +185,7 @@ def interactive_main_menu(
         ]
 
         # Compute the fixed cell width (max visible width of any cell) and align all cells to it
-        col_width = max(visible_len(f"{c.muted('[')}{c.accent_bold(str(n))}{c.muted(']')} {label}") for row in item_rows for _, label in row)
+        col_width = max(visible_len(f"{c.muted('[')}{c.accent_bold(str(num))}{c.muted(']')} {label}") for row in item_rows for num, label in row)
 
         row_strs = []
         for row in item_rows:
