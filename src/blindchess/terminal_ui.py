@@ -322,6 +322,105 @@ class TerminalUI:
             print("\n")
             return "quit"
 
+    def render_timer_bar(self, remaining_sec: float, total_sec: float) -> str:
+        """Render a compact horizontal timer progress bar."""
+        if total_sec <= 0:
+            return ""
+        frac = max(0.0, min(1.0, remaining_sec / total_sec))
+        length = 8
+        filled = int(frac * length)
+        empty = length - filled
+        fill_char = "=" if self.ascii_only else "█"
+        empty_char = "." if self.ascii_only else "░"
+        return f"[{fill_char * filled}{empty_char * empty}]"
+
+    def timed_prompt(
+        self,
+        prompt_text: str = "❯ ",
+        time_limit_sec: float = 30.0,
+    ) -> Tuple[str, float, bool]:
+        """
+        Prompt user with an active countdown timer.
+        
+        Uses monotonic clock and non-blocking I/O.
+        Returns:
+            Tuple[str, float, bool]: (answer_str, elapsed_seconds, is_timeout)
+        """
+        import select
+        import time
+
+        c = self.palette
+        start_time = time.monotonic()
+
+        # Non-TTY mode (pipes, test fixtures, automated non-interactive runs)
+        if not sys.stdin.isatty():
+            sys.stdout.write(f"{c.accent('❯')} {prompt_text} ")
+            sys.stdout.flush()
+            line = sys.stdin.readline()
+            elapsed = round(time.monotonic() - start_time, 2)
+            if not line:
+                return "quit", elapsed, False
+            cleaned = line.strip()
+            is_timeout = (elapsed > time_limit_sec)
+            return cleaned, elapsed, is_timeout
+
+        # TTY Interactive mode with non-blocking key reads and live countdown
+        import termios
+        import tty
+
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        chars: List[str] = []
+
+        try:
+            tty.setcbreak(fd)
+
+            while True:
+                elapsed = time.monotonic() - start_time
+                remaining = max(0.0, time_limit_sec - elapsed)
+
+                if remaining <= 0.0:
+                    sys.stdout.write(f"\r\033[K {c.error_bold('⏱ [Time Expired!]')} (Limit: {time_limit_sec}s)\n")
+                    sys.stdout.flush()
+                    return "".join(chars).strip(), round(elapsed, 2), True
+
+                # Determine styling by remaining percentage
+                bar = self.render_timer_bar(remaining, time_limit_sec)
+                rem_int = int(remaining)
+
+                if remaining <= 5.0:
+                    timer_badge = c.error_bold(f"⏱ {bar} {remaining:.1f}s ! ")
+                elif remaining <= (0.25 * time_limit_sec):
+                    timer_badge = c.warning_bold(f"⏱ {bar} {rem_int}s ⚠ ")
+                else:
+                    timer_badge = c.accent(f"⏱ {bar} {rem_int}s ")
+
+                user_typed = "".join(chars)
+                line_display = f"\r\033[K {c.bold(prompt_text)} {timer_badge}❯ {user_typed}"
+                sys.stdout.write(line_display)
+                sys.stdout.flush()
+
+                # Poll for user keypress up to 0.15s
+                timeout_poll = min(0.15, max(0.01, remaining))
+                r, _, _ = select.select([sys.stdin], [], [], timeout_poll)
+                if r:
+                    ch = sys.stdin.read(1)
+                    if ch in ("\n", "\r"):
+                        sys.stdout.write("\n")
+                        sys.stdout.flush()
+                        return "".join(chars).strip(), round(time.monotonic() - start_time, 2), False
+                    elif ch == "\x03":  # Ctrl+C
+                        sys.stdout.write("\n")
+                        sys.stdout.flush()
+                        return "quit", round(time.monotonic() - start_time, 2), False
+                    elif ch in ("\x7f", "\b"):  # Backspace
+                        if chars:
+                            chars.pop()
+                    elif ord(ch) >= 32:  # Printable character
+                        chars.append(ch)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
     # -------------------------------------------------------------------------
     # Board & Move Visualizations
     # -------------------------------------------------------------------------

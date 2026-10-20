@@ -171,6 +171,13 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             );
         """)
 
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS training_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+        """)
+
         # Performance indices
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_mode ON sessions(mode);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tactics_theme ON tactical_results(theme);")
@@ -484,6 +491,11 @@ class DatabaseManager:
             "hints": getattr(profile, "recent_hints", []),
             "exercise_ids": getattr(profile, "recent_exercise_ids", []),
             "mistakes": getattr(profile, "recent_mistakes", []),
+            "time_multiplier": getattr(profile, "time_multiplier", 1.0),
+            "total_timeouts": getattr(profile, "total_timeouts", 0),
+            "fastest_solve_seconds": getattr(profile, "fastest_solve_seconds", None),
+            "timer_mode": getattr(profile, "timer_mode", "adaptive"),
+            "recent_response_ratios": getattr(profile, "recent_response_ratios", []),
         }
         recent_json = json.dumps(recent_data)
         mastered_list = list(getattr(profile, "mastered_concepts", set()))
@@ -544,6 +556,12 @@ class DatabaseManager:
         recent_hints = []
         recent_ids = []
         recent_mistakes = []
+        time_mult = 1.0
+        tot_timeouts = 0
+        fastest_solve = None
+        t_mode = "adaptive"
+        r_ratios = []
+
         try:
             r_data = json.loads(row["recent_history_json"] or "{}")
             if isinstance(r_data, dict):
@@ -551,6 +569,13 @@ class DatabaseManager:
                 recent_hints = r_data.get("hints", [])
                 recent_ids = r_data.get("exercise_ids", [])
                 recent_mistakes = r_data.get("mistakes", [])
+                time_mult = float(r_data.get("time_multiplier", 1.0))
+                tot_timeouts = int(r_data.get("total_timeouts", 0))
+                fastest_solve = r_data.get("fastest_solve_seconds", None)
+                if fastest_solve is not None:
+                    fastest_solve = float(fastest_solve)
+                t_mode = r_data.get("timer_mode", "adaptive")
+                r_ratios = r_data.get("recent_response_ratios", [])
             elif isinstance(r_data, list):
                 recent_first = r_data
         except Exception:
@@ -580,7 +605,31 @@ class DatabaseManager:
             recent_mistakes=recent_mistakes,
             mastered_concepts=mastered,
             last_trained_at=row["last_trained_at"],
+            time_multiplier=time_mult,
+            total_timeouts=tot_timeouts,
+            fastest_solve_seconds=fastest_solve,
+            timer_mode=t_mode,
+            recent_response_ratios=r_ratios,
         )
+
+    def set_setting(self, key: str, value: str) -> None:
+        """Store key-value configuration preference."""
+        with self.conn:
+            self.conn.execute(
+                """INSERT INTO training_settings (key, value)
+                   VALUES (?, ?)
+                   ON CONFLICT(key) DO UPDATE SET value = excluded.value;""",
+                (key, str(value)),
+            )
+
+    def get_setting(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        """Retrieve key-value configuration preference."""
+        try:
+            cur = self.conn.execute("SELECT value FROM training_settings WHERE key = ?;", (key,))
+            row = cur.fetchone()
+            return row["value"] if row else default
+        except Exception:
+            return default
 
     def get_all_skill_profiles(self) -> Dict[str, Any]:
         """Retrieve all adaptive skill profiles."""

@@ -7,9 +7,11 @@ from typing import Optional
 import chess
 
 from blindchess.adaptive import (
+    BASE_TIMERS_BY_LEVEL,
     CURRICULUM_LEVELS,
     SKILL_DEFINITIONS,
     AdaptiveEngine,
+    compute_allowed_time,
     generate_adaptive_exercise,
     generate_curriculum_exercise,
 )
@@ -232,7 +234,8 @@ def run_blindfold_drills(config: AppConfig, db_mgr: Optional[DatabaseManager], l
         ui.print_shortcut_bar([
             ("a", "Adaptive Training (Auto)"),
             ("1-10", "Train Curriculum Level"),
-            ("p", "Skill Ratings (All 9)"),
+            ("p", "Skill Ratings & Timers"),
+            ("t", f"Timer Mode ({engine.get_timer_mode().capitalize()})"),
             ("r", "Mistakes Practice"),
             ("x", "Reset Progress"),
             ("q", "Main Menu"),
@@ -248,6 +251,13 @@ def run_blindfold_drills(config: AppConfig, db_mgr: Optional[DatabaseManager], l
         elif choice == "p":
             _display_skill_ratings(ui, engine)
             ui.prompt("Press Enter to return...")
+        elif choice == "t":
+            cur_mode = engine.get_timer_mode()
+            modes = ["adaptive", "challenge", "learning"]
+            next_idx = (modes.index(cur_mode) + 1) % len(modes) if cur_mode in modes else 0
+            new_mode = modes[next_idx]
+            engine.set_timer_mode(new_mode)
+            ui.print_success(f"Switched Timer Mode to: {new_mode.capitalize()} (Active across all skills)")
         elif choice == "r":
             _run_smart_mistakes_practice(config, ui, db_mgr)
         elif choice == "x":
@@ -256,13 +266,13 @@ def run_blindfold_drills(config: AppConfig, db_mgr: Optional[DatabaseManager], l
             lvl_num = int(choice)
             _run_adaptive_exercise_session(config, ui, db_mgr, engine=engine, curriculum_level=lvl_num)
         else:
-            ui.print_warning("Enter 'a' for adaptive training, 1-10 for curriculum level, 'p' for skill ratings, or 'q' to exit.")
+            ui.print_warning("Enter 'a' for adaptive training, 1-10 for curriculum level, 't' for timer mode, or 'q' to exit.")
 
 
 def _display_skill_ratings(ui: TerminalUI, engine: AdaptiveEngine) -> None:
-    """Display comprehensive ratings and proficiency breakdown for all 9 independent skills."""
+    """Display comprehensive ratings, timing metrics, and proficiency breakdown for all 9 independent skills."""
     c = ui.palette
-    ui.print_divider("Independent Skill Ratings & Proficiency")
+    ui.print_divider("Independent Skill Ratings & Adaptive Timers")
 
     rows = []
     for skill_id, info in SKILL_DEFINITIONS.items():
@@ -270,6 +280,9 @@ def _display_skill_ratings(ui: TerminalUI, engine: AdaptiveEngine) -> None:
         solved_str = f"{p.total_solved} / {p.total_attempts}"
         acc_str = f"{p.first_attempt_accuracy:.0f}%" if p.total_attempts > 0 else "N/A"
         speed_str = f"{p.avg_response_time}s" if p.total_attempts > 0 else "N/A"
+        best_str = f"{p.fastest_solve_seconds:.1f}s" if p.fastest_solve_seconds is not None else "N/A"
+        timeouts_str = f"{p.total_timeouts} ({p.timeout_rate:.0f}%)"
+        timer_str = f"{p.time_multiplier:.2f}x ({p.timer_mode.capitalize()})"
         diff_str = f"{p.current_difficulty}/10"
 
         if p.current_difficulty >= 8:
@@ -287,12 +300,15 @@ def _display_skill_ratings(ui: TerminalUI, engine: AdaptiveEngine) -> None:
             f"{p.proficiency:.1f}%",
             solved_str,
             acc_str,
+            timeouts_str,
             speed_str,
+            best_str,
+            timer_str,
             status_str,
         ])
 
     ui.print_table(
-        ["Skill Area", "Difficulty", "Proficiency", "Solved / Att", "First-Att %", "Avg Speed", "Rating Tier"],
+        ["Skill Area", "Diff", "Prof", "Solved", "1st-Att %", "Timeouts", "Avg Time", "Best Time", "Timer Pace", "Tier"],
         rows,
     )
 
@@ -339,6 +355,7 @@ def _run_adaptive_exercise_session(
 
     profile = engine.get_profile(target_skill)
     session = ActiveSession(mode="spatial", level=profile.current_difficulty, db_mgr=db_mgr)
+    timer_mode = engine.get_timer_mode()
 
     ui.print_divider(round_title)
 
@@ -347,13 +364,15 @@ def _run_adaptive_exercise_session(
     recent_total = len(profile.recent_first_attempts[-10:])
     recent_acc_str = f"{recent_corr}/{recent_total}" if recent_total > 0 else "0/0"
     hints_in_recent = sum(profile.recent_hints[-10:]) if profile.recent_hints else 0
+    best_spd_str = f"{profile.fastest_solve_seconds:.1f}s" if profile.fastest_solve_seconds is not None else "N/A"
 
     status_card_lines = [
         f"Skill: {c.accent_bold(profile.name)}",
         f"Difficulty: {c.highlight(f'{profile.current_difficulty}/10')}",
+        f"Timer Mode: {c.highlight(timer_mode.capitalize())} (Pace Multiplier: {profile.time_multiplier:.2f}x)",
         f"Recent accuracy: {c.highlight(recent_acc_str)}",
         f"First-attempt accuracy: {c.highlight(f'{profile.first_attempt_accuracy:.0f}%')}",
-        f"Hints used (recent): {hints_in_recent}",
+        f"Timeouts: {profile.total_timeouts} ({profile.timeout_rate:.0f}%)  •  Best Speed: {best_spd_str}",
         f"Next objective: {c.muted(profile.get_next_objective())}",
     ]
     print("\n" + ui.render_panel("Spatial Memory Drills — Status", status_card_lines, width=64, border_style="accent") + "\n")
@@ -370,6 +389,9 @@ def _run_adaptive_exercise_session(
 
         recent_seen_ids.add(drill.id)
 
+        eff_lvl = curriculum_level or profile.current_difficulty
+        time_allowed = compute_allowed_time(eff_lvl, drill, profile, timer_mode=timer_mode)
+
         print(f" {c.accent_bold(f'--- Exercise {idx}/{target_count} [Difficulty {profile.current_difficulty}/10] ---')}")
 
         if drill.initial_board_description:
@@ -384,6 +406,7 @@ def _run_adaptive_exercise_session(
 
         drill_card_lines = [
             f"Skill:    {c.highlight(profile.name)}   [Tier: {profile.current_difficulty}/10]",
+            f"Timer:    {c.accent_bold(f'{time_allowed}s')} ({timer_mode.capitalize()} Mode • {profile.time_multiplier:.2f}x)",
             f"Concept:  {c.muted(drill.category.replace('_', ' ').title())}",
             "",
             drill.prompt,
@@ -393,13 +416,63 @@ def _run_adaptive_exercise_session(
         ui.print_shortcut_bar([("hint", "Hint"), ("skip", "Skip/Reveal"), ("quit", "Exit Round")])
         print()
 
-        start_time = time.time()
         hints_used = 0
         attempts = 0
         was_revealed = False
 
         while True:
-            ans = ui.prompt(f"[{c.accent(profile.name)} (L{profile.current_difficulty})] ❯ ").strip().lower()
+            # The timer must start when the question is displayed, not while the next question is being prepared.
+            ans, resp_time, is_timeout = ui.timed_prompt(
+                prompt_text=f"[{c.accent(profile.name)} (L{profile.current_difficulty})]",
+                time_limit_sec=time_allowed,
+            )
+            ans = ans.strip().lower()
+
+            if is_timeout:
+                total_time_round += resp_time
+                ui.print_warning(f"Time limit expired! ({resp_time}s / {time_allowed}s allowed)\n")
+                ui.print_message(f"Solution: {drill.explanation}\n", prefix="Solution")
+
+                promo_res = engine.record_attempt(
+                    skill_id=target_skill,
+                    exercise_id=drill.id,
+                    is_first_attempt=True,
+                    is_correct=False,
+                    hints_used=hints_used,
+                    response_time=resp_time,
+                    was_revealed=False,
+                    concept_key=drill.category,
+                    session_id=session.session_id,
+                    time_allowed=time_allowed,
+                    is_timeout=True,
+                    timer_mode=timer_mode,
+                )
+                if db_mgr:
+                    db_mgr.record_spatial_drill(
+                        session_id=session.session_id,
+                        stage=eff_lvl,
+                        stage_name=profile.name,
+                        category=drill.category,
+                        exercise_id=drill.id,
+                        solved=False,
+                        attempts=1,
+                        hints_used=hints_used,
+                        response_time_seconds=resp_time,
+                        user_answer="(Timeout)",
+                        error_reason="Time limit expired",
+                    )
+                follow_up = ui.prompt("Press Enter to proceed (or 'r' to retry, 'q' to abort round)...").strip().lower()
+                if follow_up in ("q", "quit"):
+                    session.close(notes=f"Aborted round after timeout on exercise {idx}")
+                    ui.print_message("Round exited.")
+                    return
+                elif follow_up == "r":
+                    retry_ans = ui.prompt(f"Retry [{c.highlight(drill.title)}] ❯ ").strip().lower()
+                    if retry_ans in [corr.lower() for corr in drill.correct_answers]:
+                        ui.print_success(f"Correct on retry! {drill.explanation}\n")
+                    else:
+                        ui.print_message(f"Solution: {drill.explanation}\n", prefix="Solution")
+                break
 
             if ans in ("q", "quit"):
                 session.close(notes=f"Aborted round during exercise {idx}")
@@ -411,8 +484,6 @@ def _run_adaptive_exercise_session(
                 session.record_hint()
                 ui.print_warning(f"Hint: {drill.hint}")
                 continue
-
-            resp_time = round(time.time() - start_time, 1)
 
             if ans in ("skip", "reveal"):
                 was_revealed = True
@@ -429,6 +500,9 @@ def _run_adaptive_exercise_session(
                     was_revealed=True,
                     concept_key=drill.category,
                     session_id=session.session_id,
+                    time_allowed=time_allowed,
+                    is_timeout=False,
+                    timer_mode=timer_mode,
                 )
                 if promo_res.action == "demoted":
                     ui.print_warning(f"\n▼ {promo_res.message}\n")
@@ -450,12 +524,13 @@ def _run_adaptive_exercise_session(
                 solved_in_round += 1
                 total_time_round += resp_time
                 if is_first and hints_used == 0:
-                    ui.print_success(f"✓ Correct on first attempt! ({resp_time}s) {drill.explanation}\n")
+                    ui.print_success(f"✓ Correct on first attempt! ({resp_time}s / {time_allowed}s) {drill.explanation}\n")
                 elif hints_used > 0:
-                    ui.print_success(f"✓ Correct with {hints_used} hint(s)! ({resp_time}s) {drill.explanation}\n")
+                    ui.print_success(f"✓ Correct with {hints_used} hint(s)! ({resp_time}s / {time_allowed}s) {drill.explanation}\n")
                 else:
-                    ui.print_success(f"✓ Correct on retry {attempts}! ({resp_time}s) {drill.explanation}\n")
+                    ui.print_success(f"✓ Correct on retry {attempts}! ({resp_time}s / {time_allowed}s) {drill.explanation}\n")
 
+                old_fastest = profile.fastest_solve_seconds
                 promo_res = engine.record_attempt(
                     skill_id=target_skill,
                     exercise_id=drill.id,
@@ -466,7 +541,13 @@ def _run_adaptive_exercise_session(
                     was_revealed=False,
                     concept_key=drill.category,
                     session_id=session.session_id,
+                    time_allowed=time_allowed,
+                    is_timeout=False,
+                    timer_mode=timer_mode,
                 )
+                if profile.fastest_solve_seconds == resp_time and (old_fastest is None or resp_time < old_fastest):
+                    ui.print_success(f"★ NEW PERSONAL BEST SPEED: {resp_time}s!\n")
+
                 if promo_res.action == "promoted":
                     ui.print_success(f"\n★ {promo_res.message}\n")
                 elif promo_res.action == "demoted":
@@ -475,7 +556,7 @@ def _run_adaptive_exercise_session(
                 if db_mgr:
                     db_mgr.record_spatial_drill(
                         session_id=session.session_id,
-                        stage=curriculum_level or profile.current_difficulty,
+                        stage=eff_lvl,
                         stage_name=profile.name,
                         category=drill.category,
                         exercise_id=drill.id,
@@ -499,9 +580,13 @@ def _run_adaptive_exercise_session(
                         was_revealed=False,
                         concept_key=drill.category,
                         session_id=session.session_id,
+                        time_allowed=time_allowed,
+                        is_timeout=False,
+                        timer_mode=timer_mode,
                     )
                     if promo_res.action == "demoted":
                         ui.print_warning(f"\n▼ {promo_res.message}\n")
+                ui.print_warning("Incorrect answer. Re-visualize the geometry and retry, or type 'hint' / 'skip'.")
                 ui.print_warning("Incorrect answer. Re-visualize the geometry and retry, or type 'hint' / 'skip'.")
 
     # Round Summary

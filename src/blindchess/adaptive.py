@@ -560,16 +560,21 @@ class AdaptiveEngine:
         was_revealed: bool = False,
         concept_key: Optional[str] = None,
         session_id: Optional[int] = None,
+        time_allowed: float = 0.0,
+        is_timeout: bool = False,
+        timer_mode: str = "adaptive",
     ) -> PromotionResult:
         """
         Record the outcome of an exercise attempt and evaluate promotion/demotion.
         
         Rules:
-        - Only clean first attempts (without hints or reveal) count fully toward promotion.
+        - Only clean first attempts (without hints, reveal, or timeout) count fully toward promotion.
         - Retries help the player learn, but do not artificially inflate first-attempt accuracy.
         - Solutions revealed receive zero credit and are recorded as errors.
-        - Promotion requires >= 80% first-attempt accuracy over last 10 attempts across >= 2 variants without excessive hints.
-        - Demotion occurs when 4 of the last 5 attempts are failures.
+        - Knowledge mastery and response speed are kept strictly separate: timeouts count as
+          unsuccessful timed attempts and adapt the timer, but do not unfairly demote chess level.
+        - Promotion requires >= 80% first-attempt accuracy over last 10 attempts across >= 2 variants.
+        - Demotion occurs when 4 of the last 5 conceptual attempts are failures.
         """
         profile = self.get_profile(skill_id)
         now_str = datetime.now().isoformat()
@@ -577,29 +582,66 @@ class AdaptiveEngine:
         profile.total_attempts += 1
         profile.total_response_time += response_time
         profile.total_hints += hints_used
+        profile.timer_mode = timer_mode
 
-        if is_correct:
+        if is_correct and not is_timeout:
             profile.total_solved += 1
 
+        # Adaptive Timer adjustment
+        if is_timeout:
+            profile.total_timeouts += 1
+            # User struggled with time limit: give 15% more time on subsequent exercises
+            profile.time_multiplier = min(1.50, round(profile.time_multiplier + 0.15, 2))
+            profile.recent_response_ratios.append(1.0)
+            if len(profile.recent_response_ratios) > 10:
+                profile.recent_response_ratios.pop(0)
+        elif is_correct and time_allowed > 0:
+            ratio = min(1.0, max(0.05, response_time / time_allowed))
+            profile.recent_response_ratios.append(ratio)
+            if len(profile.recent_response_ratios) > 10:
+                profile.recent_response_ratios.pop(0)
+
+            if profile.fastest_solve_seconds is None or response_time < profile.fastest_solve_seconds:
+                profile.fastest_solve_seconds = round(response_time, 2)
+
+            # Rolling window adjustment across recent 3 attempts
+            if len(profile.recent_response_ratios) >= 3:
+                recent_3 = profile.recent_response_ratios[-3:]
+                avg_ratio = sum(recent_3) / len(recent_3)
+                if avg_ratio < 0.60:
+                    # Consistently fast and correct: gradually reduce time down to 20% below base (>= 0.80)
+                    profile.time_multiplier = max(0.80, round(profile.time_multiplier - 0.05, 2))
+                elif avg_ratio > 0.85:
+                    # Correct but slow: regularly approaching deadline -> slight increase (+5% up to 1.30)
+                    profile.time_multiplier = min(1.30, round(profile.time_multiplier + 0.05, 2))
+
         # Evaluate first attempt credit
-        clean_first_success = (is_first_attempt and is_correct and not was_revealed and hints_used == 0)
+        clean_first_success = (
+            is_first_attempt
+            and is_correct
+            and not was_revealed
+            and not is_timeout
+            and hints_used == 0
+        )
 
         if is_first_attempt:
-            profile.recent_first_attempts.append(clean_first_success)
-            profile.recent_hints.append(hints_used)
-            profile.recent_exercise_ids.append(exercise_id)
+            # Timeouts do not count as conceptual errors for knowledge demotion
+            if not is_timeout:
+                profile.recent_first_attempts.append(clean_first_success)
+                profile.recent_hints.append(hints_used)
+                profile.recent_exercise_ids.append(exercise_id)
 
-            # Cap recent windows to prevent unbounded memory growth
-            if len(profile.recent_first_attempts) > 30:
-                profile.recent_first_attempts.pop(0)
-                profile.recent_hints.pop(0)
-                profile.recent_exercise_ids.pop(0)
+                # Cap recent windows to prevent unbounded memory growth
+                if len(profile.recent_first_attempts) > 30:
+                    profile.recent_first_attempts.pop(0)
+                    profile.recent_hints.pop(0)
+                    profile.recent_exercise_ids.pop(0)
 
             if clean_first_success:
                 profile.first_attempt_successes += 1
                 if concept_key:
                     profile.mastered_concepts.add(concept_key)
-            elif not is_correct or was_revealed:
+            elif (not is_correct or was_revealed) and not is_timeout:
                 if concept_key and concept_key not in profile.recent_mistakes:
                     profile.recent_mistakes.append(concept_key)
                     if len(profile.recent_mistakes) > 5:
@@ -629,7 +671,7 @@ class AdaptiveEngine:
         variants = profile.recent_exercise_ids
 
         # --- Check Demotion First ---
-        # Rule: 4 of the last 5 answers wrong
+        # Rule: 4 of the last 5 conceptual answers wrong
         if len(window) >= cfg.demotion_window:
             recent_5 = window[-cfg.demotion_window:]
             failures_in_5 = sum(1 for x in recent_5 if not x)
@@ -639,6 +681,10 @@ class AdaptiveEngine:
                     profile.current_difficulty -= 1
                     reason = f"Difficulty reduced temporarily: {failures_in_5} of last {cfg.demotion_window} attempts failed. Reinforcing core understanding."
                     msg = f"Difficulty reduced to {profile.current_difficulty}/10: let's reinforce foundational {profile.name} concepts."
+
+                    # Reset timer multiplier for easier level
+                    profile.time_multiplier = 1.0
+                    profile.recent_response_ratios.clear()
 
                     # Record event in DB
                     self._record_adaptive_event(profile.skill_id, "demoted", old_diff, profile.current_difficulty, reason, session_id)
@@ -670,6 +716,10 @@ class AdaptiveEngine:
                     reason = f"Difficulty increased: {correct_count}/{cfg.promotion_window} correct on first attempt across diverse variants."
                     msg = f"Difficulty increased to {profile.current_difficulty}/10: you consistently solved {profile.name} exercises!"
 
+                    # Reset timer multiplier for new level base time
+                    profile.time_multiplier = 1.0
+                    profile.recent_response_ratios.clear()
+
                     self._record_adaptive_event(profile.skill_id, "promoted", old_diff, profile.current_difficulty, reason, session_id)
                     # Fresh window for the new difficulty level
                     profile.recent_first_attempts = []
@@ -684,6 +734,30 @@ class AdaptiveEngine:
             new_difficulty=profile.current_difficulty,
             reason="Performance stable; continuing at current challenge level.",
         )
+
+    def set_timer_mode(self, mode: str) -> None:
+        """Set timer mode ('adaptive', 'learning', 'challenge') across all skills."""
+        valid_mode = mode.lower() if mode.lower() in ("adaptive", "learning", "challenge") else "adaptive"
+        for profile in self.profiles.values():
+            profile.timer_mode = valid_mode
+        self.save_all_profiles()
+        if self.db_mgr and hasattr(self.db_mgr, "set_setting"):
+            try:
+                self.db_mgr.set_setting("timer_mode", valid_mode)
+            except Exception:
+                pass
+
+    def get_timer_mode(self) -> str:
+        """Return current timer mode preference."""
+        if self.db_mgr and hasattr(self.db_mgr, "get_setting"):
+            try:
+                saved = self.db_mgr.get_setting("timer_mode", None)
+                if saved and saved in ("adaptive", "learning", "challenge"):
+                    return saved
+            except Exception:
+                pass
+        sample_p = next(iter(self.profiles.values()), None)
+        return sample_p.timer_mode if sample_p else "adaptive"
 
     def _record_adaptive_event(
         self,
@@ -717,6 +791,11 @@ class AdaptiveEngine:
                 name=info["name"],
                 current_difficulty=1,
                 proficiency=0.0,
+                time_multiplier=1.0,
+                total_timeouts=0,
+                fastest_solve_seconds=None,
+                timer_mode="adaptive",
+                recent_response_ratios=[],
             )
         self.save_all_profiles()
         if self.db_mgr and hasattr(self.db_mgr, "reset_adaptive_progress"):

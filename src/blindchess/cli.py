@@ -176,26 +176,21 @@ def interactive_main_menu(
             training_level=config.training_level,
         )
 
-        # Structured, numeric-ordered menu list
-        items = [
-            ("1", "Blindfold Game"),
-            ("2", "Play vs Stockfish"),
-            ("3", "Spatial Memory Drills"),
-            ("4", "Candidate Calculation"),
-            ("5", "Variation Explorer"),
-            ("6", "Strategic Position Coach"),
-            ("7", "Tactical Training (Puzzles)"),
-            ("8", "Opening Repertoires"),
-            ("9", "Endgame Fundamentals"),
-            ("10", "Game Diagnostic Review"),
-            ("11", "Training Statistics"),
-            ("12", "System Configuration"),
+        # 3-column, 4-row numeric-ordered menu
+        item_rows = [
+            [(1, "Blindfold Game"), (2, "Play vs Stockfish"), (3, "Spatial Memory Drills")],
+            [(4, "Candidate Calculation"), (5, "Variation Explorer"), (6, "Strategic Position Coach")],
+            [(7, "Tactical Training (Puzzles)"), (8, "Opening Repertoires"), (9, "Endgame Fundamentals")],
+            [(10, "Game Diagnostic Review"), (11, "Training Statistics"), (12, "System Configuration")],
         ]
 
-        lines = []
-        for num, label in items:
-            lines.append(f"  {c.muted('[')}{c.accent_bold(num)}{c.muted(']')} {label}")
-        print("\n".join(lines) + "\n")
+        row_strs = []
+        for row in item_rows:
+            cells = []
+            for num, label in row:
+                cells.append(f"{c.muted('[')}{c.accent_bold(str(num))}{c.muted(')')} {label}")
+            row_strs.append("  " + "  ".join(cells))
+        print("\n".join(row_strs) + "\n")
         ui.print_shortcut_bar([
             ("1-12", "Select Mode"),
             ("q", "Quit"),
