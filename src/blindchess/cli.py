@@ -188,8 +188,8 @@ def interactive_main_menu(
         for row in item_rows:
             cells = []
             for num, label in row:
-                cells.append(f"{c.muted('[')}{c.accent_bold(str(num))}{c.muted(')')} {label}")
-            row_strs.append("  " + "  ".join(cells))
+                cells.append(f"{c.muted('[')}{c.accent_bold(str(num))}{c.muted(']')} {label}")
+            row_strs.append("   " + "    ".join(cells))
         print("\n".join(row_strs) + "\n")
         ui.print_shortcut_bar([
             ("1-12", "Select Mode"),
