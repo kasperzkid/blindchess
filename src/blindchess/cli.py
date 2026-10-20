@@ -71,12 +71,12 @@ def _run_settings(config: AppConfig) -> None:
             "hidden": dim("Hidden"),
             "manual_reveal": warn("Manual Reveal"),
             "after_move": succ("Reveal after move"),
-            "normal": succ_bold if False else dim("Normal"),
+            "normal": succ("Normal"),
         }
         return mapping.get(v, v)
 
     def fmt_side(v: str) -> str:
-        return succ_bold if False else dim(v.capitalize())
+        return dim(v.capitalize())
 
     def show_settings() -> None:
         ui.print_divider("Active Configuration")
