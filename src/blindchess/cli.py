@@ -3,6 +3,7 @@
 import argparse
 import logging
 from pathlib import Path
+import shutil
 import signal
 import sys
 from typing import Optional
@@ -26,6 +27,174 @@ from blindchess.training import (
 )
 
 logger = logging.getLogger("blindchess")
+
+
+def _run_settings(config: AppConfig) -> None:
+    """Interactive settings editor with categorized, human-readable display."""
+    ui = TerminalUI(ascii_only=config.ascii_only)
+    c = ui.palette
+    display = ui.palette.highlight
+    dim = ui.palette.muted
+    dim_bold = ui.palette.bold
+    warn = ui.palette.warning_bold
+    succ = ui.palette.success_bold
+
+    # Settings are grouped into logical categories.
+    CATEGORIES = [
+        ("Engines & Board", [
+            ("engine_path", "Stockfish executable (path)", "path"),
+            ("default_opponent_level", "Default opponent level", "level"),
+            ("board_visibility", "Board visibility", "visibility"),
+            ("strict_blindfold", "Strict blindfold mode", "bool"),
+            ("ascii_only", "ASCII-only rendering", "bool"),
+        ]),
+        ("Engine & Analysis", [
+            ("engine_threads", "Engine threads", "int"),
+            ("engine_hash_mb", "Engine hash memory (MB)", "int"),
+            ("analysis_depth", "Analysis depth", "int"),
+            ("analysis_time_limit", "Analysis time limit (s)", "float"),
+            ("multipv", "MultiPV", "int"),
+            ("tablebase_path", "Tablebase path", "path"),
+        ]),
+        ("Training & Behaviour", [
+            ("adaptive_difficulty", "Adaptive difficulty", "bool"),
+            ("training_level", "Training level", "int"),
+            ("user_side", "User side to play", "side"),
+        ]),
+    ]
+
+    def fmt_bool(v: bool) -> str:
+        return succ("ON") if v else dim("OFF")
+
+    def fmt_visibility(v: str) -> str:
+        mapping = {
+            "hidden": dim("Hidden"),
+            "manual_reveal": warn("Manual Reveal"),
+            "after_move": succ("Reveal after move"),
+            "normal": succ_bold if False else dim("Normal"),
+        }
+        return mapping.get(v, v)
+
+    def fmt_side(v: str) -> str:
+        return succ_bold if False else dim(v.capitalize())
+
+    def show_settings() -> None:
+        ui.print_divider("Active Configuration")
+        print()
+        for category, fields in CATEGORIES:
+            # Section header
+            print(f"  {c.highlight(category)}")
+            print(f"  {c.muted('─' * 40)}")
+            print(f"  {c.muted('Key'):<30} {c.muted('Description'):<38} Current")
+            print(f"  {c.muted('─' * 30)}  {c.muted('─' * 38)}  {'─' * 18}")
+            for key, desc, kind in fields:
+                value = getattr(config, key)
+                if kind == "bool":
+                    shown = fmt_bool(value)
+                elif kind == "visibility":
+                    shown = fmt_visibility(value)
+                elif kind == "side":
+                    shown = fmt_side(value)
+                elif kind == "int":
+                    shown = str(value)
+                elif kind == "path":
+                    shown = str(value) if value else dim("(auto)")
+                else:
+                    shown = str(value)
+                print(f"  {c.accent_bold(key):<30} {c.muted(desc):<38} {shown}")
+            print()
+        print(f"{c.muted('─' * 40)}")
+        print(f"  {c.muted('•')} Values are saved to disk automatically (config file).")
+        print(f"  {c.muted('•')} Run '12' again, or use '--config <file>' to load a different file.")
+        print()
+
+    def edit_settings() -> None:
+        """Edit a single setting, then persist back to disk."""
+        # Show current settings for context
+        show_settings()
+        choice = ui.prompt("Choose a setting to edit (or 'back'): ").strip().lower()
+        if choice in ("back", "", "b"):
+            return
+
+        # Match the choice to a field
+        target = None
+        for cat_fields in CATEGORIES:
+            for key, desc, kind in cat_fields:
+                if key.lower() == choice.lower():
+                    target = (key, desc, kind)
+                    break
+            if target:
+                break
+
+        if target is None:
+            ui.print_warning(f"Unknown setting '{choice}'. Try again.")
+            ui.prompt("Press Enter to continue...")
+            return
+
+        key, desc, kind = target
+        current = getattr(config, key)
+
+        # Build a prompt with the current value
+        if kind == "bool":
+            prompt = f"{c.accent_bold(key)} [{c.muted('ON')}] {c.muted('or')} [{c.muted('OFF')}] : "
+            ans = ui.prompt(prompt).strip().lower()
+            if ans.startswith("o"):
+                new_val = ans.startswith("on")
+            else:
+                new_val = False
+        elif kind == "visibility":
+            opts = [("hidden", dim("Hidden")), ("manual_reveal", warn("Manual Reveal")),
+                    ("after_move", succ("Reveal after move")), ("normal", succ("Normal"))]
+            print(f"{c.highlight('Board visibility options:')}")
+            for opt, label in opts:
+                print(f"  {c.muted('-')} {c.accent_bold(opt)}  {label}")
+            ans = ui.prompt(f"{c.accent_bold(key)} select (hidden/manual_reveal/after_move/normal): ").strip().lower()
+            new_val = next((v for v, _ in opts if v == ans), None)
+            if new_val is None:
+                ui.print_warning(f"Invalid option '{ans}'. No change made.")
+                ui.prompt("Press Enter to continue...")
+                return
+        elif kind == "side":
+            opts = [("white", dim("White")), ("black", dim("Black")), ("random", warn("Random"))]
+            print(f"{c.highlight('Player side options:')}")
+            for opt, label in opts:
+                print(f"  {c.muted('-')} {c.accent_bold(opt)}  {label}")
+            ans = ui.prompt(f"{c.accent_bold(key)} select (white/black/random): ").strip().lower()
+            new_val = next((v for v, _ in opts if v == ans), None)
+            if new_val is None:
+                ui.print_warning(f"Invalid option '{ans}'. No change made.")
+                ui.prompt("Press Enter to continue...")
+                return
+        else:
+            prompt = f"{c.accent_bold(key)} [{dim(str(current))}]: "
+            raw = ui.prompt(prompt).strip()
+            if raw == "":
+                new_val = current
+            else:
+                try:
+                    if kind == "int":
+                        new_val = int(raw)
+                    elif kind == "float":
+                        new_val = float(raw)
+                    else:
+                        new_val = raw
+                except ValueError:
+                    ui.print_warning(f"Invalid value '{raw}'. No change made.")
+                    ui.prompt("Press Enter to continue...")
+                    return
+
+        # Apply and persist
+        setattr(config, key, new_val)
+        try:
+            save_config(config)
+            ui.print_success(f"{key} updated to {new_val}. Configuration saved.")
+        except Exception as e:
+            ui.print_error(f"Failed to save configuration: {e}")
+
+        ui.prompt("Press Enter to continue...")
+
+    show_settings()
+    edit_settings()
 
 
 def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
@@ -176,24 +345,48 @@ def interactive_main_menu(
             training_level=config.training_level,
         )
 
-        # 3-column, 4-row numeric-ordered menu
-        item_rows = [
-            [(1, "Blindfold Game"), (2, "Play vs Stockfish"), (3, "Spatial Memory Drills")],
-            [(4, "Candidate Calculation"), (5, "Variation Explorer"), (6, "Strategic Position Coach")],
-            [(7, "Tactical Training (Puzzles)"), (8, "Opening Repertoires"), (9, "Endgame Fundamentals")],
-            [(10, "Game Diagnostic Review"), (11, "Training Statistics"), (12, "System Configuration")],
-        ]
+        cols = shutil.get_terminal_size(fallback=(80, 24)).columns
 
-        # Compute the fixed cell width (max visible width of any cell) and align all cells to it
-        col_width = max(visible_len(f"{c.muted('[')}{c.accent_bold(str(num))}{c.muted(']')} {label}") for row in item_rows for num, label in row)
+        # 3 columns x 4 rows when terminal width >= 90; 2 columns x 6 rows for narrower terminals
+        if cols >= 90:
+            item_rows = [
+                [(1, "Blindfold Game"), (2, "Play vs Stockfish"), (3, "Spatial Memory Drills")],
+                [(4, "Candidate Calculation"), (5, "Variation Explorer"), (6, "Strategic Position Coach")],
+                [(7, "Tactical Training (Puzzles)"), (8, "Opening Repertoires"), (9, "Endgame Fundamentals")],
+                [(10, "Game Diagnostic Review"), (11, "Training Statistics"), (12, "System Configuration")],
+            ]
+        else:
+            item_rows = [
+                [(1, "Blindfold Game"), (2, "Play vs Stockfish")],
+                [(3, "Spatial Memory Drills"), (4, "Candidate Calculation")],
+                [(5, "Variation Explorer"), (6, "Strategic Position Coach")],
+                [(7, "Tactical Training (Puzzles)"), (8, "Opening Repertoires")],
+                [(9, "Endgame Fundamentals"), (10, "Game Diagnostic Review")],
+                [(11, "Training Statistics"), (12, "System Configuration")],
+            ]
+
+        # Calculate max visible width for each column to guarantee razor-sharp alignment
+        num_cols = len(item_rows[0])
+        col_widths = [0] * num_cols
+        for row in item_rows:
+            for col_idx, (num, label) in enumerate(row):
+                vis = visible_len(f"[{num}] {label}")
+                if vis > col_widths[col_idx]:
+                    col_widths[col_idx] = vis
 
         row_strs = []
         for row in item_rows:
             cells = []
-            for num, label in row:
-                cell = f"{c.muted('[')}{c.accent_bold(str(num))}{c.muted(']')} {label}"
-                cells.append(cell.ljust(col_width))
-            row_strs.append("   " + "   ".join(cells))
+            for col_idx, (num, label) in enumerate(row):
+                tag = f"{c.muted('[')}{c.accent_bold(str(num))}{c.muted(']')}"
+                cell_text = f"{tag} {label}"
+                vis = visible_len(cell_text)
+                pad_len = col_widths[col_idx] - vis
+                if col_idx < num_cols - 1:
+                    cells.append(cell_text + (" " * pad_len))
+                else:
+                    cells.append(cell_text)
+            row_strs.append("  " + "   ".join(cells))
         print("\n".join(row_strs) + "\n")
         ui.print_shortcut_bar([
             ("1-12", "Select Mode"),
@@ -233,12 +426,7 @@ def interactive_main_menu(
         elif choice in ("11", "stats"):
             display_statistics(db_mgr, config)
         elif choice in ("12", "settings"):
-            ui.print_divider("Active Configuration")
-            rows = []
-            for k, v in sorted(config.to_dict().items()):
-                rows.append([k, str(v) if v is not None else "(auto)"])
-            ui.print_table(["Setting Key", "Current Value"], rows)
-            ui.prompt("Press Enter to return...")
+            _run_settings(config)
         elif choice in ("13", "quit", "exit", "q"):
             ui.print_success("Thank you for training with BlindChess.")
             break

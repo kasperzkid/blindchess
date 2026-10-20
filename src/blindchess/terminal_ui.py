@@ -175,7 +175,7 @@ class TerminalUI:
 
     def print_banner(self) -> None:
         """Print clean, modern application header without oversized ASCII clutter."""
-        w = self.get_width(max_w=84)
+        w = self.get_width(max_w=94)
         c = self.palette
         b = self.box
 
@@ -239,7 +239,7 @@ class TerminalUI:
         """Render compact, structured status bar."""
         c = self.palette
         b = self.box
-        w = self.get_width(max_w=84)
+        w = self.get_width(max_w=94)
 
         if engine_ready:
             eng_badge = f"{c.success(b.check)} Engine: {c.highlight(engine_name)}"

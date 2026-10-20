@@ -66,3 +66,37 @@ def test_board_rendering_card(capsys):
     captured = capsys.readouterr().out
     assert "Chessboard View" in captured
     assert "Turn: White" in captured
+
+
+def test_main_menu_grid_alignment(capsys):
+    """Test that main menu grid renders with uniform column alignment."""
+    import os
+    import shutil
+    from unittest.mock import patch
+    from blindchess.config import AppConfig
+    from blindchess.cli import interactive_main_menu
+
+    config = AppConfig()
+
+    # Test 3-column layout on wide terminal (cols=100)
+    with patch("shutil.get_terminal_size", return_value=os.terminal_size((100, 30))):
+        with patch("blindchess.terminal_ui.TerminalUI.prompt", side_effect=["q"]):
+            interactive_main_menu(config, None, None)
+
+    out = capsys.readouterr().out
+    lines = [line for line in out.splitlines() if "[1]" in line or "[4]" in line or "[7]" in line or "[10]" in line]
+    assert len(lines) == 4
+    # Check that [2], [5], [8], [11] all start at the exact same character index in their respective lines
+    idx2 = lines[0].index("[2]")
+    idx5 = lines[1].index("[5]")
+    idx8 = lines[2].index("[8]")
+    idx11 = lines[3].index("[11]")
+    assert idx2 == idx5 == idx8 == idx11
+
+    # Check that [3], [6], [9], [12] all start at the exact same character index
+    idx3 = lines[0].index("[3]")
+    idx6 = lines[1].index("[6]")
+    idx9 = lines[2].index("[9]")
+    idx12 = lines[3].index("[12]")
+    assert idx3 == idx6 == idx9 == idx12
+
