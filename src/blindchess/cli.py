@@ -11,7 +11,7 @@ from blindchess.config import AppConfig, load_config, save_config
 from blindchess.engine_manager import EngineManager
 from blindchess.errors import BlindChessError
 from blindchess.persistence import DatabaseManager
-from blindchess.terminal_ui import TerminalUI
+from blindchess.terminal_ui import TerminalUI, visible_len
 from blindchess.training import (
     display_statistics,
     run_blindfold_drills,
@@ -184,12 +184,16 @@ def interactive_main_menu(
             [(10, "Game Diagnostic Review"), (11, "Training Statistics"), (12, "System Configuration")],
         ]
 
+        # Compute the fixed cell width (max visible width of any cell) and align all cells to it
+        col_width = max(visible_len(f"{c.muted('[')}{c.accent_bold(str(n))}{c.muted(']')} {label}") for row in item_rows for _, label in row)
+
         row_strs = []
         for row in item_rows:
             cells = []
             for num, label in row:
-                cells.append(f"{c.muted('[')}{c.accent_bold(str(num))}{c.muted(']')} {label}")
-            row_strs.append("   " + "    ".join(cells))
+                cell = f"{c.muted('[')}{c.accent_bold(str(num))}{c.muted(']')} {label}"
+                cells.append(cell.ljust(col_width))
+            row_strs.append("   " + "   ".join(cells))
         print("\n".join(row_strs) + "\n")
         ui.print_shortcut_bar([
             ("1-12", "Select Mode"),
