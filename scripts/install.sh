@@ -224,7 +224,7 @@ python3 -m venv "${VENV_DIR}"
 
 echo "Installing BlindChess and dependencies..."
 "${VENV_DIR}/bin/pip" install --upgrade pip --quiet
-"${VENV_DIR}/bin/pip" install "${SCRIPT_DIR}" --quiet
+"${VENV_DIR}/bin/pip" install -e "${SCRIPT_DIR}" --quiet
 
 echo -e "${GREEN}✓ Package installed in virtual environment.${RESET}"
 
